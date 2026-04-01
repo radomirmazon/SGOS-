@@ -63,17 +63,22 @@ GND      →    GND
 ## Architektura
 
 ```
-Core 1 (Arduino loop)          Core 0 (FreeRTOS)
-──────────────────────         ─────────────────────────
-audio.play(data, len)  ──►    AudioPlayer::audioTask()
-audio.stop()           ──►      i2s_channel_write() × N
-audio.isPlaying()              → SD pin HIGH/LOW
-                               → semafory FreeRTOS
+Core 1 (Arduino loop)              Core 0 (FreeRTOS)
+──────────────────────             ──────────────────────────────────
+audio.play(data, len)    ──►      AudioPlayer::audioTask()
+audio.playNext(data, len)           do {
+audio.loopNext(data, len)  ──►       i2s_write() porcjami CHUNK_BYTES
+audio.transition(data, len)          gapless chain (_nextData)
+audio.loop(data, len)              } while (loopData || gaplessNext)
+audio.stop()             ──►      i2s_zero_dma_buffer()
+audio.isPlaying()                  SD pin HIGH / LOW
+                                   _doneSem, _mutex (FreeRTOS)
 ```
 
-- `play()` jest **nieblokujące** – wraca natychmiast, dźwięk gra w tle
-- `stop()` ustawia flagę; zadanie kończy bieżącą porcję i wycisza wzmacniacz
-- Wywołanie `play()` podczas odtwarzania → bezpiecznie przerywa i zaczyna nowy dźwięk
+- Wszystkie metody są **nieblokujące** – wracają natychmiast
+- Cleanup (flush DMA + mute wzmacniacza) wykonywany jest tylko przy prawdziwym zatrzymaniu, **nie** przy przejściu między dźwiękami w łańcuchu gapless
+- `play()` – przerywa aktywny dźwięk/pętlę, czyści kolejkę i `_onDone` (jeśli trwała pętla)
+- `stop()` – czyści pętlę, kolejkę i `_onDone`; zadanie wycisza wzmacniacz po bieżącej porcji
 
 ---
 
@@ -81,59 +86,100 @@ audio.isPlaying()              → SD pin HIGH/LOW
 
 ```cpp
 AudioPlayer audio(bclkPin, lrcPin, dinPin, sdPin);
+```
 
-audio.begin();                        // setup() – inicjalizuje I2S, tworzy task
-audio.play(const uint8_t* data, size_t length);  // nieblokujące, anuluje pętlę
-audio.loop(const uint8_t* data, size_t length);  // odtwarza w kółko
-audio.stop();                         // nieblokujące, anuluje pętlę
+### Inicjalizacja
+
+```cpp
+audio.begin();          // Inicjalizuje I2S (legacy driver), tworzy task na Core 0
+```
+
+### Format danych wejściowych
+
+```cpp
+audio.setBitDepth(AudioPlayer::BITS_8);   // domyślnie: uint8 (0–255) → int16 przed I2S
+audio.setBitDepth(AudioPlayer::BITS_16);  // int16 little-endian, wysyłany bezpośrednio
+```
+
+| Tryb | Typ próbki | Konwersja |
+|------|-----------|-----------|
+| `BITS_8` (domyślny) | `uint8_t` | `(val - 128) << 8` → `int16_t` |
+| `BITS_16` | `int16_t` (LE) | brak – wysyłane wprost do I2S |
+
+### Odtwarzanie
+
+```cpp
+// Zatrzymuje bieżący dźwięk i zaczyna nowy; czyści pętlę i kolejkę
+audio.play(const uint8_t* data, size_t length);
+
+// Odtwarza w nieskończoność; przerwać przez play() lub stop()
+audio.loop(const uint8_t* data, size_t length);
+
+// Kolejkuje następny dźwięk – zostanie odtworzony gapless po bieżącym
+// (bez flush DMA i cyklu mute/unmute). Bezpieczne wywołanie w trakcie odtwarzania.
+audio.playNext(const uint8_t* data, size_t length);
+
+// Jak playNext, ale po przejściu dźwięk jest odtwarzany w pętli
+audio.loopNext(const uint8_t* data, size_t length);
+
+// Gapless przejście z aktywnej pętli do jednorazowego dźwięku.
+// Kończy bieżącą iterację pętli i przechodzi BEZ przerwy.
+// Nie wywołuj play() – to jest jego zamiennik w kontekście pętli.
+audio.transition(const uint8_t* data, size_t length);
+
+// Zatrzymuje odtwarzanie; czyści pętlę, kolejkę i _onDone
+audio.stop();
+
 bool playing = audio.isPlaying();
+```
 
-audio.setOnDone(std::function<void()> cb);  // callback po zakończeniu dźwięku
+### Callback
+
+```cpp
+audio.setOnDone(std::function<void()> cb);  // wywoływany z Core 0 po zakończeniu
 audio.clearOnDone();                        // usuwa callback
 ```
 
-### Callback `setOnDone`
+> **Uwaga:** Callback działa na Core 0. Wykonywać tylko krótkie operacje –
+> `play()`, `clearOnDone()` lub ustawienie flagi dla `loop()`.
 
-Wywoływany automatycznie po zakończeniu odtwarzania (z Core 0 – audio task).
-Wewnątrz callbacku można bezpiecznie wywołać `play()`, aby zakolejkować następny dźwięk.
+---
 
-**Zapętlenie przez `loop()` (zalecane):**
+### Przykłady użycia
+
+**Prosta pętla:**
 ```cpp
 audio.loop(ambientSound, ambientSoundLen);  // gra aż do play() lub stop()
 
-// Przerwanie pętli i odtworzenie innego dźwięku:
+// Przerwanie pętli nowym dźwiękiem:
 audio.play(chevronSound, chevronSoundLen);  // pętla anulowana automatycznie
-
-// Zatrzymanie:
-audio.stop();
 ```
 
-**Ręczne zapętlenie przez callback:**
+**Gapless chain – dźwięk startowy + pętla:**
 ```cpp
-audio.setOnDone([&]() {
-    audio.play(loopSound, loopSoundLen);
-});
-audio.play(loopSound, loopSoundLen);
+audio.play(snd_roll_start, snd_roll_start_len);
+audio.loopNext(snd_roll, snd_roll_len);     // po starcie → pętla bez przerwy
 ```
 
-**Sekwencja dźwięków:**
+**Gapless wyjście z pętli:**
+```cpp
+// Trwa pętla snd_roll...
+audio.transition(snd_gate_open, snd_gate_open_len);
+// Pętla dokończy iterację, następnie gapless przejdzie do snd_gate_open
+```
+
+**Sekwencja przez callback:**
 ```cpp
 audio.setOnDone([&]() {
     static int step = 0;
     switch (step++) {
         case 0: audio.play(sound1, sound1Len); break;
         case 1: audio.play(sound2, sound2Len); break;
-        default:
-            audio.clearOnDone();
-            step = 0;
-            break;
+        default: audio.clearOnDone(); step = 0; break;
     }
 });
 audio.play(sound0, sound0Len);
 ```
-
-> **Uwaga:** Callback działa na Core 0. Nie należy w nim wykonywać długich operacji –
-> tylko `play()` / `clearOnDone()` lub ustawienie flagi dla `loop()`.
 
 ---
 
