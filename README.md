@@ -55,6 +55,15 @@ pio run --target upload
 
 ## Documentation
 
+### Project docs
+
+- [AudioPlayer — MAX98357A I2S](docs/audio_player.md)
+- [Button — debounce, short/long click](docs/button.md)
+- [I2C Configuration — PCA9685](docs/i2c_configuration.md)
+- [Motor — DC motor driver](docs/motor.md)
+
+### Datasheets & external references
+
 - [ESP32-S3 Datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf)
 - [ESP32-S3-DevKitM-1 User Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/hw-reference/esp32s3/user-guide-devkitm-1.html)
 - [PCA9685 Datasheet](https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf)
