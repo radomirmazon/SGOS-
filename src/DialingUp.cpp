@@ -148,7 +148,7 @@ void DialingUp::openingGate() {
 }
 
 void DialingUp::incommingCall() {
-   switch(stage) {
+    switch(stage) {
         case 200:
             cancelStage = 300;
             switch(round) {
@@ -190,7 +190,7 @@ void DialingUp::incommingCall() {
                 stage = 200;
             }
         break;
-   }
+    }
 }
 
 void DialingUp::dialFail() {
