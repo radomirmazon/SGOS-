@@ -34,7 +34,15 @@ void Button::loop() {
         } else {
             // Button released
             if (_pressedState && !_longFired) {
-                if (_onShortClick) _onShortClick();
+                _clickCount++;
+                if (_clickCount == 1) {
+                    _waitingDouble    = true;
+                    _doubleClickStart = now;
+                } else if (_clickCount >= 2) {
+                    _waitingDouble = false;
+                    _clickCount    = 0;
+                    if (_onDoubleClick) _onDoubleClick();
+                }
             }
             _pressedState = false;
         }
@@ -43,9 +51,18 @@ void Button::loop() {
     // Long press: fire once while still held
     if (_pressedState && !_longFired) {
         if ((now - _pressStart) >= LONG_PRESS_MS) {
-            _longFired = true;
+            _longFired     = true;
+            _waitingDouble = false;
+            _clickCount    = 0;
             if (_onLongClick) _onLongClick();
         }
+    }
+
+    // Double-click window expired — treat as single short click
+    if (_waitingDouble && !_pressedState && (now - _doubleClickStart) >= DOUBLE_CLICK_MS) {
+        _waitingDouble = false;
+        _clickCount    = 0;
+        if (_onShortClick) _onShortClick();
     }
 }
 

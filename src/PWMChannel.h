@@ -51,8 +51,6 @@ public:
   uint16_t getCurrentPWM() const;
   uint8_t getChannel() const;
   void loop();
-
-  static uint16_t gammaCorrectedPWM(uint8_t brightness);
 };
 
 #endif

@@ -6,6 +6,7 @@
 #include "AudioPlayer.h"
 #include "DialingUp.h"
 #include "Button.h"
+#include "Lamp.h"
 
 // --- MAX98357A I2S pins ---
 // BCLK → GPIO15 | LRC → GPIO16 | DIN → GPIO17 | SD → GPIO18 | GAIN → GND (9 dB)
@@ -38,9 +39,14 @@ DialingUp* pDialup;
 
 Button dialButton;
 
-#define MODE_GATE 0
-#define MODE_LAMP 1
-uint8_t gateMode = MODE_GATE;
+Lamp* pLamp = nullptr;
+
+// --- Losowe wywołania incoming co 3–15 minut ---
+static unsigned long nextIncomingMs = 0;
+
+static unsigned long randomIncomingInterval() {
+  return (unsigned long)random(15UL * 60000UL, 45UL * 60000UL);
+}
 
 void setup() {
 
@@ -95,14 +101,31 @@ void setup() {
   pWhiteLed = new PWMChannel(pca1, 11);
 
   pDialup = new DialingUp(&audio, &motor, pChevron, pBlueLed, pWhiteLed);
+  pLamp = new Lamp(pChevron, pBlueLed, pWhiteLed);
+
+  nextIncomingMs = millis() + randomIncomingInterval();
 
   dialButton.begin(46);  // GPIO46, active low (przycisk do GND)
   dialButton.onShortClick([]() {
+    if (!pLamp->isBussy()) {
       pDialup->dial();
+    } else {
+      pLamp->onButtonClick();
+    }
   });
 
   dialButton.onLongClick([]() {
-    pDialup->incomming();
+    if (!pLamp->isBussy()) {
+      pDialup->incomming();
+    } else {
+      pLamp->reset();
+    }
+  });
+
+  dialButton.onDoubleClick([]() {
+    if (!pDialup->isBussy()) {
+      pLamp->onButtonClick();
+    }
   });
 
 } 
@@ -118,4 +141,12 @@ void loop() {
   pWhiteLed->loop();
   pDialup->loop();
   dialButton.loop();
+  pLamp->loop();
+
+  if (millis() >= nextIncomingMs) {
+    nextIncomingMs = millis() + randomIncomingInterval();
+    if (!pDialup->isBussy() && !pLamp->isBussy()) {
+      pDialup->incomming();
+    }
+  }
 }

@@ -63,22 +63,26 @@ GND      →    GND
 ## Architektura
 
 ```
-Core 1 (Arduino loop)              Core 0 (FreeRTOS)
-──────────────────────             ──────────────────────────────────
-audio.play(data, len)    ──►      AudioPlayer::audioTask()
-audio.playNext(data, len)           do {
-audio.loopNext(data, len)  ──►       i2s_write() porcjami CHUNK_BYTES
-audio.transition(data, len)          gapless chain (_nextData)
-audio.loop(data, len)              } while (loopData || gaplessNext)
-audio.stop()             ──►      i2s_zero_dma_buffer()
-audio.isPlaying()                  SD pin HIGH / LOW
-                                   _doneSem, _mutex (FreeRTOS)
+Core 1 (Arduino loop)                   Core 0 (FreeRTOS)
+───────────────────────────────         ───────────────────────────────────────
+audio.play(data, len, ch)     ──►      AudioPlayer::audioTask()
+audio.playNext(data, len, ch)           ┌─────────────┐
+audio.loopNext(data, len, ch) ──►      │  kanał 0    │──► mixBuf (int32)
+audio.transition(data, len, ch)         └─────────────┘         │  clamp → int16
+audio.loop(data, len, ch)               ┌─────────────┐         │
+audio.stop(ch)                ──►      │  kanał 1    │──► mixBuf │
+audio.stopAll()               ──►      └─────────────┘         │
+audio.isPlaying(ch)                     i2s_write() porcjami CHUNK_SAMPLES
+audio.isAnyPlaying()                    SD pin HIGH / LOW
+                                        _doneSem[ch], _mutex (FreeRTOS)
 ```
 
+- **Wirtualne kanały** – `NUM_CHANNELS = 2` niezależnych strumieni audio miksowanych programowo (suma int32, clamp do int16 przed wysyłką do I2S)
+- Aby zwiększyć liczbę kanałów, wystarczy zmienić `NUM_CHANNELS` w `AudioPlayer.h` – reszta skaluje się automatycznie
 - Wszystkie metody są **nieblokujące** – wracają natychmiast
-- Cleanup (flush DMA + mute wzmacniacza) wykonywany jest tylko przy prawdziwym zatrzymaniu, **nie** przy przejściu między dźwiękami w łańcuchu gapless
-- `play()` – przerywa aktywny dźwięk/pętlę, czyści kolejkę i `_onDone` (jeśli trwała pętla)
-- `stop()` – czyści pętlę, kolejkę i `_onDone`; zadanie wycisza wzmacniacz po bieżącej porcji
+- Cleanup (flush DMA + mute wzmacniacza) wykonywany jest tylko gdy **wszystkie** kanały są nieaktywne, nie przy przejściu gapless ani gdy inny kanał nadal gra
+- `play(data, len, ch)` – przerywa aktywny dźwięk/pętlę na danym kanale, czyści kolejkę; inne kanały nie są przerywane
+- `stop(ch)` – zatrzymuje dany kanał; wzmacniacz wyciszany dopiero gdy ostatni aktywny kanał skończy
 
 ---
 
@@ -108,36 +112,43 @@ audio.setBitDepth(AudioPlayer::BITS_16);  // int16 little-endian, wysyłany bezp
 
 ### Odtwarzanie
 
-```cpp
-// Zatrzymuje bieżący dźwięk i zaczyna nowy; czyści pętlę i kolejkę
-audio.play(const uint8_t* data, size_t length);
+Każda metoda przyjmuje opcjonalny parametr `channel` (0 … `NUM_CHANNELS-1`, domyślnie `0`).
+Operacje na jednym kanale nie wpływają na pozostałe.
 
-// Odtwarza w nieskończoność; przerwać przez play() lub stop()
-audio.loop(const uint8_t* data, size_t length);
+```cpp
+// Zatrzymuje bieżący dźwięk na kanale i zaczyna nowy; czyści pętlę i kolejkę
+audio.play(const uint8_t* data, size_t length, int channel = 0);
+
+// Odtwarza w nieskończoność na kanale; przerwać przez play() lub stop()
+audio.loop(const uint8_t* data, size_t length, int channel = 0);
 
 // Kolejkuje następny dźwięk – zostanie odtworzony gapless po bieżącym
 // (bez flush DMA i cyklu mute/unmute). Bezpieczne wywołanie w trakcie odtwarzania.
-audio.playNext(const uint8_t* data, size_t length);
+audio.playNext(const uint8_t* data, size_t length, int channel = 0);
 
 // Jak playNext, ale po przejściu dźwięk jest odtwarzany w pętli
-audio.loopNext(const uint8_t* data, size_t length);
+audio.loopNext(const uint8_t* data, size_t length, int channel = 0);
 
-// Gapless przejście z aktywnej pętli do jednorazowego dźwięku.
+// Gapless przejście z aktywnej pętli do jednorazowego dźwięku na kanale.
 // Kończy bieżącą iterację pętli i przechodzi BEZ przerwy.
 // Nie wywołuj play() – to jest jego zamiennik w kontekście pętli.
-audio.transition(const uint8_t* data, size_t length);
+audio.transition(const uint8_t* data, size_t length, int channel = 0);
 
-// Zatrzymuje odtwarzanie; czyści pętlę, kolejkę i _onDone
-audio.stop();
+// Zatrzymuje odtwarzanie na wskazanym kanale; inne kanały nie są przerywane
+audio.stop(int channel = 0);
 
-bool playing = audio.isPlaying();
+// Zatrzymuje wszystkie kanały
+audio.stopAll();
+
+bool playing    = audio.isPlaying(int channel = 0);  // czy dany kanał gra?
+bool anyPlaying = audio.isAnyPlaying();              // czy cokolwiek gra?
 ```
 
 ### Callback
 
 ```cpp
-audio.setOnDone(std::function<void()> cb);  // wywoływany z Core 0 po zakończeniu
-audio.clearOnDone();                        // usuwa callback
+audio.setOnDone(std::function<void()> cb, int channel = 0);  // wywoływany z Core 0 po zakończeniu
+audio.clearOnDone(int channel = 0);                          // usuwa callback
 ```
 
 > **Uwaga:** Callback działa na Core 0. Wykonywać tylko krótkie operacje –
@@ -147,7 +158,16 @@ audio.clearOnDone();                        // usuwa callback
 
 ### Przykłady użycia
 
-**Prosta pętla:**
+**Dwa kanały jednocześnie (muzyka tła + efekt):**
+```cpp
+// Kanał 0: ambient w pętli
+audio.loop(ambientSound, ambientSoundLen, 0);
+
+// Kanał 1: jednorazowy efekt (gra równocześnie z kanałem 0)
+audio.play(chevronSound, chevronSoundLen, 1);
+```
+
+**Prosta pętla (kanał domyślny):**
 ```cpp
 audio.loop(ambientSound, ambientSoundLen);  // gra aż do play() lub stop()
 
@@ -179,6 +199,11 @@ audio.setOnDone([&]() {
     }
 });
 audio.play(sound0, sound0Len);
+```
+
+**Zatrzymanie wszystkiego:**
+```cpp
+audio.stopAll();  // zatrzymuje kanał 0 i 1; wzmacniacz wyciszany po ostatnim kanale
 ```
 
 ---

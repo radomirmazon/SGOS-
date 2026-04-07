@@ -2,11 +2,14 @@
 
 static constexpr size_t      TASK_STACK_SIZE = 4096;
 static constexpr UBaseType_t TASK_PRIORITY   = 2;
-static constexpr int         AUDIO_CORE      = 0;   // Core 1 = Arduino loop, Core 0 = audio
-static constexpr size_t      CHUNK_BYTES     = 512;
+static constexpr int         AUDIO_CORE      = 0;    // Core 1 = Arduino loop, Core 0 = mikser
+// Liczba próbek int16 przetwarzanych w jednej iteracji miksera (16 ms przy 16 kHz).
+// Bufor miksujący zajmuje CHUNK_SAMPLES × 4 B = 1 KB (int32, tylko BSS, nie stos).
+static constexpr size_t      CHUNK_SAMPLES   = 256;
 static constexpr TickType_t  WRITE_TIMEOUT   = pdMS_TO_TICKS(200);
 static constexpr TickType_t  STOP_TIMEOUT    = pdMS_TO_TICKS(600);
 
+// ---------------------------------------------------------------------------
 AudioPlayer::AudioPlayer(int bclkPin, int lrcPin, int dinPin, int sdPin, i2s_port_t port)
     : _bclkPin(bclkPin), _lrcPin(lrcPin), _dinPin(dinPin), _sdPin(sdPin), _port(port) {}
 
@@ -14,12 +17,11 @@ void AudioPlayer::begin() {
     pinMode(_sdPin, OUTPUT);
     digitalWrite(_sdPin, LOW);  // Wzmacniacz wyciszony do pierwszego play()
 
-    // --- Konfiguracja I2S (legacy driver, działa na ESP-IDF 4.x i 5.x) ---
     i2s_config_t cfg = {};
     cfg.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
     cfg.sample_rate          = AUDIO_SAMPLE_RATE;
     cfg.bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT;
-    cfg.channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT;  // mono na lewym kanale
+    cfg.channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     cfg.intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1;
     cfg.dma_buf_count        = 4;
@@ -38,10 +40,12 @@ void AudioPlayer::begin() {
     i2s_set_pin(_port, &pins);
     i2s_zero_dma_buffer(_port);
 
-    // --- FreeRTOS ---
-    _mutex   = xSemaphoreCreateMutex();
-    _doneSem = xSemaphoreCreateBinary();
-    xSemaphoreGive(_doneSem);  // Początkowo "wolny"
+    _mutex = xSemaphoreCreateMutex();
+
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        _doneSem[ch] = xSemaphoreCreateBinary();
+        xSemaphoreGive(_doneSem[ch]);  // Początkowo "wolny" – play() może od razu startować
+    }
 
     xTaskCreatePinnedToCore(
         audioTask, "AudioPlayer",
@@ -51,155 +55,245 @@ void AudioPlayer::begin() {
     );
 }
 
-void AudioPlayer::loop(const uint8_t* data, size_t length) {
-    _loopData   = data;
-    _loopLength = length;
-    // Looping obsługiwany bezpośrednio w audioTask (do-while bez cleanup)
-    _playRaw(data, length);
-}
-
-void AudioPlayer::play(const uint8_t* data, size_t length) {
-    // Przerwij aktywną pętlę i wyczyść kolejkę – _onDone ustawiony ręcznie jest zachowany
-    if (_loopData) {
-        _loopData   = nullptr;
-        _loopLength = 0;
-        _onDone     = nullptr;
+// ---------------------------------------------------------------------------
+bool AudioPlayer::isAnyPlaying() const {
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        if (_channels[ch].playing) return true;
     }
-    _nextData   = nullptr;
-    _nextLength = 0;
-    _nextLoop   = false;
-    _playRaw(data, length);
-}
-
-void AudioPlayer::playNext(const uint8_t* data, size_t length) {
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    _nextData   = data;
-    _nextLength = length;
-    _nextLoop   = false;
-    xSemaphoreGive(_mutex);
-}
-
-void AudioPlayer::loopNext(const uint8_t* data, size_t length) {
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    _nextData   = data;
-    _nextLength = length;
-    _nextLoop   = true;
-    xSemaphoreGive(_mutex);
-}
-
-void AudioPlayer::transition(const uint8_t* data, size_t length) {
-    // Nie przerywamy odtwarzania – tylko podmieniamy kolejkę i wyłączamy pętlę.
-    // Task skończy bieżącą iterację i bezpośrednio (gapless) przejdzie do nowych danych.
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    _loopData   = nullptr;
-    _loopLength = 0;
-    _nextData   = data;
-    _nextLength = length;
-    _nextLoop   = false;
-    xSemaphoreGive(_mutex);
-}
-
-void AudioPlayer::_playRaw(const uint8_t* data, size_t length) {
-    // Zatrzymaj bieżące odtwarzanie i poczekaj aż zadanie zwolni
-    _playing = false;
-    xSemaphoreTake(_doneSem, STOP_TIMEOUT);
-
-    // Ustaw nowe dane
-    xSemaphoreTake(_mutex, portMAX_DELAY);
-    _audioData   = data;
-    _audioLength = length;
-    _playing     = true;
-    xSemaphoreGive(_mutex);
-
-    digitalWrite(_sdPin, HIGH);    // Aktywuj wzmacniacz
-    xTaskNotifyGive(_taskHandle);  // Obudź zadanie audio
-}
-
-void AudioPlayer::stop() {
-    _loopData   = nullptr;
-    _loopLength = 0;
-    _nextData   = nullptr;
-    _nextLength = 0;
-    _nextLoop   = false;
-    _onDone     = nullptr;
-    _playing = false;
-    // Zadanie samo wyciszy wzmacniacz po zakończeniu bieżącej porcji
+    return false;
 }
 
 // ---------------------------------------------------------------------------
-// Zadanie FreeRTOS – działa na Core 0
+void AudioPlayer::play(const uint8_t* data, size_t length, int channel) {
+    // Wyczyść pętlę i kolejkę tego kanału, inne kanały pozostają nienaruszone
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].loopData   = nullptr;
+    _channels[channel].loopLength = 0;
+    _channels[channel].nextData   = nullptr;
+    _channels[channel].nextLength = 0;
+    _channels[channel].nextLoop   = false;
+    xSemaphoreGive(_mutex);
+
+    _playRaw(data, length, channel);
+}
+
+void AudioPlayer::loop(const uint8_t* data, size_t length, int channel) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].loopData   = data;
+    _channels[channel].loopLength = length;
+    xSemaphoreGive(_mutex);
+
+    _playRaw(data, length, channel);
+}
+
+void AudioPlayer::playNext(const uint8_t* data, size_t length, int channel) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].nextData   = data;
+    _channels[channel].nextLength = length;
+    _channels[channel].nextLoop   = false;
+    xSemaphoreGive(_mutex);
+}
+
+void AudioPlayer::loopNext(const uint8_t* data, size_t length, int channel) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].nextData   = data;
+    _channels[channel].nextLength = length;
+    _channels[channel].nextLoop   = true;
+    xSemaphoreGive(_mutex);
+}
+
+void AudioPlayer::transition(const uint8_t* data, size_t length, int channel) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].loopData   = nullptr;
+    _channels[channel].loopLength = 0;
+    _channels[channel].nextData   = data;
+    _channels[channel].nextLength = length;
+    _channels[channel].nextLoop   = false;
+    xSemaphoreGive(_mutex);
+}
+
+void AudioPlayer::stop(int channel) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].loopData   = nullptr;
+    _channels[channel].loopLength = 0;
+    _channels[channel].nextData   = nullptr;
+    _channels[channel].nextLength = 0;
+    _channels[channel].nextLoop   = false;
+    _channels[channel].playing    = false;
+    xSemaphoreGive(_mutex);
+    // audioTask wykryje !playing && wasActive i zwolni _doneSem[channel]
+}
+
+void AudioPlayer::stopAll() {
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        stop(ch);
+    }
+}
+
+// ---------------------------------------------------------------------------
+void AudioPlayer::_playRaw(const uint8_t* data, size_t length, int channel) {
+    // Gdy wywołanie pochodzi z callbacku wewnątrz audioTask – pomijamy czekanie
+    // na semafor (task sam właśnie zwolnił kanał) i nie budzimy taska ponownie.
+    const bool fromTask = (xTaskGetCurrentTaskHandle() == _taskHandle);
+
+    if (!fromTask) {
+        _channels[channel].playing = false;              // Sygnał do taska: zatrzymaj kanał
+        xSemaphoreTake(_doneSem[channel], STOP_TIMEOUT); // Czekaj na potwierdzenie od taska
+    }
+
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _channels[channel].audioData   = data;
+    _channels[channel].audioLength = length;
+    _channels[channel].audioOffset = 0;
+    _channels[channel].playing     = true;
+    xSemaphoreGive(_mutex);
+
+    if (!fromTask) {
+        digitalWrite(_sdPin, HIGH);       // Aktywuj wzmacniacz (jeśli był wyciszony)
+        xTaskNotifyGive(_taskHandle);     // Obudź task jeśli spał
+    }
+    // fromTask: task jest już aktywny – wykryje playing=true w następnej iteracji pętli
+}
+
+// ---------------------------------------------------------------------------
+// audioTask – działa na Core 0; miesza próbki ze wszystkich kanałów i wysyła do I2S
 // ---------------------------------------------------------------------------
 void AudioPlayer::audioTask(void* param) {
     auto* self = static_cast<AudioPlayer*>(param);
 
+    // Bufory statyczne – nie zajmują stosu zadania
+    static int32_t         mixBuf[CHUNK_SAMPLES];          // akumulator miksera
+    static int16_t         outBuf[CHUNK_SAMPLES];          // wynik po clampingu
+    static const int16_t   silence[CHUNK_SAMPLES] = {};    // cisza do flush DMA
+
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Czekaj na sygnał z play()
+        // Czekaj na pierwszy sygnał z play()
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // Odrzuć nadmiarowe powiadomienia (np. gdy wiele kanałów startuje jednocześnie)
+        ulTaskNotifyTake(pdTRUE, 0);
 
-        // Pętla wewnętrzna: przy aktywnym loop lub zakolejkowanym playNext
-        // restartuje dane BEZ cleanup – brak przerwy i cyklu mute/unmute.
-        bool gaplessNext = false;
-        do {
-            gaplessNext = false;
+        digitalWrite(self->_sdPin, HIGH);  // Aktywuj wzmacniacz
 
-            xSemaphoreTake(self->_mutex, portMAX_DELAY);
-            const uint8_t* data   = (const uint8_t*)self->_audioData;
-            size_t         length = self->_audioLength;
-            xSemaphoreGive(self->_mutex);
+        // Pętla miksera – działa dopóki co najmniej jeden kanał jest aktywny
+        bool anyActive = true;
+        while (anyActive) {
+            anyActive = false;
+            memset(mixBuf, 0, CHUNK_SAMPLES * sizeof(int32_t));
 
-            // Wyślij dane do I2S porcjami
-            size_t offset = 0;
-            if (self->_bitDepth == AudioPlayer::BITS_8) {
-                // Konwersja uint8 (0–255) → int16 signed przed wysłaniem do I2S
-                int16_t conv[CHUNK_BYTES];
-                while (offset < length && self->_playing) {
-                    size_t samples = min(CHUNK_BYTES, length - offset);
-                    for (size_t i = 0; i < samples; i++) {
-                        conv[i] = ((int16_t)data[offset + i] - 128) << 8;
-                    }
-                    size_t written = 0;
-                    i2s_write(self->_port, conv, samples * sizeof(int16_t), &written, WRITE_TIMEOUT);
-                    offset += samples;
+            // Flagi do obsługi po zapisie do I2S (poza sekcją krytyczną)
+            bool needDone[NUM_CHANNELS]    = {};
+            bool naturalDone[NUM_CHANNELS] = {};
+
+            for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+                Channel& c = self->_channels[ch];
+
+                // Kanał zatrzymany zewnętrznie (stop/play z innego wątku) –
+                // zwolnij semafor aby odblokować ewentualnie czekający _playRaw()
+                if (!c.playing && c.wasActive) {
+                    c.wasActive  = false;
+                    needDone[ch] = true;
+                    continue;
                 }
-            } else {
-                while (offset < length && self->_playing) {
-                    size_t toWrite = min(CHUNK_BYTES, length - offset);
-                    size_t written = 0;
-                    i2s_write(self->_port, data + offset, toWrite, &written, WRITE_TIMEOUT);
-                    if (written > 0) offset += written;
-                }
-            }
 
-            // Przesuń zakolejkowany playNext/loopNext → bieżący (gapless chain)
-            if (self->_nextData != nullptr) {
+                if (!c.playing) continue;
+
+                anyActive   = true;
+                c.wasActive = true;
+
+                // Odczyt wskaźnika i długości pod mutexem
                 xSemaphoreTake(self->_mutex, portMAX_DELAY);
-                self->_audioData   = self->_nextData;
-                self->_audioLength = self->_nextLength;
-                if (self->_nextLoop) {
-                    self->_loopData   = self->_nextData;
-                    self->_loopLength = self->_nextLength;
-                    self->_nextLoop   = false;
+                const uint8_t* data   = (const uint8_t*)c.audioData;
+                size_t         length = c.audioLength;
+                size_t         offset = c.audioOffset;
+                xSemaphoreGive(self->_mutex);
+
+                // Oblicz ile próbek wymiksować z tego kanału
+                const size_t bps         = (self->_bitDepth == BITS_8) ? 1u : 2u;
+                const size_t remainBytes = (length > offset) ? (length - offset) : 0u;
+                const size_t toMix       = (remainBytes / bps < CHUNK_SAMPLES)
+                                           ? (remainBytes / bps) : CHUNK_SAMPLES;
+
+                // Dodaj próbki kanału do bufora int32 (int32 zabezpiecza przed
+                // przepełnieniem przy sumowaniu wielu kanałów int16)
+                if (self->_bitDepth == BITS_8) {
+                    for (size_t i = 0; i < toMix; i++) {
+                        // uint8 (0–255) → int16 signed → dodaj do akumulatora
+                        mixBuf[i] += (int32_t)(((int16_t)data[offset + i] - 128) << 8);
+                    }
+                } else {
+                    const auto* src16 = reinterpret_cast<const int16_t*>(data + offset);
+                    for (size_t i = 0; i < toMix; i++) {
+                        mixBuf[i] += (int32_t)src16[i];
+                    }
                 }
-                self->_nextData    = nullptr;
-                self->_nextLength  = 0;
-                gaplessNext = true;
+
+                offset += toMix * bps;
+
+                // Zaktualizuj offset i obsłuż koniec klipu pod mutexem
+                xSemaphoreTake(self->_mutex, portMAX_DELAY);
+                c.audioOffset = offset;
+
+                if (offset >= length) {
+                    if (c.nextData != nullptr) {
+                        // Gapless chain: następny zakolejkowany dźwięk
+                        c.audioData   = c.nextData;
+                        c.audioLength = c.nextLength;
+                        c.audioOffset = 0;
+                        if (c.nextLoop) {
+                            c.loopData   = c.nextData;
+                            c.loopLength = c.nextLength;
+                            c.nextLoop   = false;
+                        }
+                        c.nextData   = nullptr;
+                        c.nextLength = 0;
+                    } else if (c.loopData != nullptr) {
+                        // Zapętlenie: wróć do początku
+                        c.audioData   = c.loopData;
+                        c.audioLength = c.loopLength;
+                        c.audioOffset = 0;
+                    } else {
+                        // Naturalne zakończenie kanału
+                        c.playing       = false;
+                        c.wasActive     = false;
+                        needDone[ch]    = true;
+                        naturalDone[ch] = true;
+                    }
+                }
                 xSemaphoreGive(self->_mutex);
             }
 
-        } while ((self->_loopData != nullptr || gaplessNext) && self->_playing);
+            // Ogranicz wynik miksera do zakresu int16 i wyślij do I2S
+            for (size_t i = 0; i < CHUNK_SAMPLES; i++) {
+                const int32_t s = mixBuf[i];
+                outBuf[i] = (int16_t)(s > 32767 ? 32767 : s < -32768 ? -32768 : s);
+            }
+            size_t written = 0;
+            i2s_write(self->_port, outBuf, sizeof(outBuf), &written, WRITE_TIMEOUT);
 
-        // Cleanup tylko przy prawdziwym zatrzymaniu (nie przy loop)
-        static const uint8_t silence[CHUNK_BYTES] = {};
+            // Zwolnij semafory i wywołaj callbacki po zapisie (nie pod mutexem)
+            for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+                if (!needDone[ch]) continue;
+
+                xSemaphoreGive(self->_doneSem[ch]);
+
+                // Callback tylko przy naturalnym zakończeniu (nie przy stop/play z zewnątrz)
+                if (naturalDone[ch]) {
+                    // Kopiuj przed wywołaniem – callback może zmieniać onDone
+                    auto cb = self->_channels[ch].onDone;
+                    if (cb) cb();
+                    // Callback mógł wznowić ten kanał przez play() – sprawdź
+                    if (self->_channels[ch].playing) anyActive = true;
+                }
+            }
+
+            // Odrzuć powiadomienia nagromadzone podczas przetwarzania chunka
+            ulTaskNotifyTake(pdTRUE, 0);
+        }
+
+        // Flush: wyślij ciszę aby opróżnić bufor DMA, a następnie wycisz wzmacniacz
         size_t dummy = 0;
         i2s_write(self->_port, silence, sizeof(silence), &dummy, pdMS_TO_TICKS(50));
         i2s_zero_dma_buffer(self->_port);
-
-        self->_playing = false;
-        digitalWrite(self->_sdPin, LOW);   // Wycisz wzmacniacz
-
-        xSemaphoreGive(self->_doneSem);    // Sygnalizuj zakończenie
-
-        // Wywołaj callback po zwolnieniu semafora – play() można bezpiecznie
-        // wywołać wewnątrz, powiadomi ten sam task przez ulTaskNotifyTake
-        if (self->_onDone) self->_onDone();
+        digitalWrite(self->_sdPin, LOW);
     }
 }

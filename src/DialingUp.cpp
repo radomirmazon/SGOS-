@@ -97,9 +97,7 @@ void DialingUp::openingGate() {
 
             for(int i=0; i<18; i++) {
                 pBlueLed[i]->autoOnOff(true);
-                pBlueLed[i]->setValue(random(MID_BLUE_VALUE, MAX_BLUE_VALUE));
-                pBlueLed[i]->setMinValue(random(MIN_BLUE_VALUE, MID_BLUE_VALUE));
-                pBlueLed[i]->setSpeed(30 /*random(1, 30)*/);
+                blueLedSetup(i);
             }
             setWaitFor(1000, 102);
             break; 
@@ -122,9 +120,7 @@ void DialingUp::openingGate() {
                 if (random(0,3) > 1) {
                     continue;
                 }
-                pBlueLed[i]->setValue(random(MID_BLUE_VALUE, MAX_BLUE_VALUE));
-                pBlueLed[i]->setMinValue(random(MIN_BLUE_VALUE, MID_BLUE_VALUE));
-                pBlueLed[i]->setSpeed(30/*random(1, 30)*/);
+                blueLedSetup(i);
             }
             stage = 103;
             break;
@@ -273,4 +269,14 @@ void DialingUp::setWaitFor(uint32_t mils, uint16_t nextStage) {
 
 uint32_t DialingUp::getRandomRotationTime() {
     return 2000 + (600 * random(4, 11));
+}
+
+void DialingUp::blueLedSetup(int i) {
+    pBlueLed[i]->setValue(random(MID_BLUE_VALUE, MAX_BLUE_VALUE));
+    pBlueLed[i]->setMinValue(random(MIN_BLUE_VALUE, MID_BLUE_VALUE));
+    pBlueLed[i]->setSpeed(random(30, 100));
+}
+
+boolean DialingUp::isBussy() {
+    return stage > 0;
 }

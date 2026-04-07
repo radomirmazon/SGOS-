@@ -12,6 +12,8 @@ public:
     void incomming();
     void loop();
 
+    boolean isBussy();
+
 private:
     bool direction = false;
     uint16_t stage = 0;
@@ -29,6 +31,7 @@ private:
     uint32_t waitInMs;
     uint32_t getRandomRotationTime();
     uint16_t cancelStage;
+    void blueLedSetup(int i);
     
 
     //stages functions:

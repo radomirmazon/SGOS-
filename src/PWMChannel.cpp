@@ -6,9 +6,16 @@ PWMChannel::PWMChannel(Adafruit_PWMServoDriver& drv, uint8_t ch)
     startPWM(0), transitionStartMs(0), transitionDurationMs(0),
     phaseOffsetMs(0), phaseStartMs(0), phaseDelayActive(false) {}
 
+// CIE 1931 perceptual correction: input linear 0-4095, output perceived 0-4095
+static uint16_t ciePWM(uint16_t linear) {
+  float L = linear / 4095.0f * 100.0f;
+  float Y = (L <= 8.0f) ? (L / 902.3f) : powf((L + 16.0f) / 116.0f, 3.0f);
+  return (uint16_t)(Y * 4095.0f + 0.5f);
+}
+
 void PWMChannel::setPWM(uint16_t pwm) {
   currentPWM = pwm;
-  driver.setPWM(channel, 0, pwm);
+  driver.setPWM(channel, 0, ciePWM(pwm));
 }
 
 void PWMChannel::startTransitionTo(uint16_t target) {
@@ -16,8 +23,8 @@ void PWMChannel::startTransitionTo(uint16_t target) {
   targetPWM = target;
   transitionStartMs = millis();
   uint16_t dist = (target > currentPWM) ? (target - currentPWM) : (currentPWM - target);
-  // same total time as linear: one STEP_INTERVAL_MS per SPEED units
-  transitionDurationMs = (dist == 0) ? 0 : ((uint32_t)dist * STEP_INTERVAL_MS + SPEED - 1) / SPEED;
+  // duration is fixed by SPEED only, so all channels with same SPEED pulse at the same rate
+  transitionDurationMs = (dist == 0) ? 0 : (uint32_t)SPEED * STEP_INTERVAL_MS;
 }
 
 void PWMChannel::setValue(uint16_t pwm) {
@@ -37,7 +44,8 @@ void PWMChannel::setOffset(uint16_t offset) {
 }
 
 void PWMChannel::setBrightness(uint8_t brightness) {
-  setPWM(gammaCorrectedPWM(brightness));
+  // linear mapping 0-100 → 0-4095; CIE correction applied in setPWM
+  setPWM((uint16_t)(brightness / 100.0f * 4095.0f + 0.5f));
 }
 
 void PWMChannel::on() {
@@ -46,12 +54,6 @@ void PWMChannel::on() {
 
 void PWMChannel::off() {
   setPWM(0);
-}
-
-uint16_t PWMChannel::gammaCorrectedPWM(uint8_t brightness) {
-  const float gamma = 2.2;
-  float normalized = brightness / 100.0;
-  return (uint16_t)(pow(normalized, gamma) * 4095.0);
 }
 
 uint16_t PWMChannel::getCurrentPWM() const {
