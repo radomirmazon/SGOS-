@@ -131,7 +131,7 @@ void DialingUp::openingGate() {
                 pChevron[i]->setValue(MAX_BRIGHTNESS); 
             }
             for (int i=0; i<18; i++) {
-                pBlueLed[i]->setSpeed(10);
+                pBlueLed[i]->setSpeed(100);
                 pBlueLed[i]->setValue(0);
             }
             setWaitFor(2400, 106);
