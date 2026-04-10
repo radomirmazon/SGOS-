@@ -1,11 +1,12 @@
 #include "Lamp.h"
+#include "config.h"
 
 void Lamp::off() {
     pWhiteLed->setValue(0);
-    for (int i=0; i<9; i++) {
+    for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
         pChevron[i]->setValue(0); 
     }
-    for (int i=0; i<18; i++) {
+    for (int i=0; i<BLUE_TABLE_SIZE; i++) {
         pBlueLed[i]->setSpeed(10);
         pBlueLed[i]->setValue(0);
     }
@@ -23,7 +24,7 @@ void Lamp::onButtonClick() {
         break; 
         case LAMP_CH:
             off();
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(MAX_BRIGHTNESS); 
             }
         break;
@@ -33,24 +34,24 @@ void Lamp::onButtonClick() {
         break;
         case LAMP_BLUE:
             off();
-            for (int i=0; i<18; i++) {
+            for (int i=0; i<BLUE_TABLE_SIZE; i++) {
                 pBlueLed[i]->setSpeed(10);
                 pBlueLed[i]->setValue(MAX_BRIGHTNESS);
             }
         break;
         case LAMP_CH_WHITE: 
             off();
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(MAX_BRIGHTNESS); 
             }
             pWhiteLed->setValue(MAX_BRIGHTNESS);
         break;
         case LAMP_CH_BLUE:
             off();
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(MAX_BRIGHTNESS); 
             }
-            for (int i=0; i<18; i++) {
+            for (int i=0; i<BLUE_TABLE_SIZE; i++) {
                 pBlueLed[i]->setSpeed(10);
                 pBlueLed[i]->setValue(MAX_BRIGHTNESS);
             }
@@ -58,10 +59,10 @@ void Lamp::onButtonClick() {
         case LAMP_ALL:
             off();
             pWhiteLed->setValue(MAX_BRIGHTNESS);
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(MAX_BRIGHTNESS); 
             }
-            for (int i=0; i<18; i++) {
+            for (int i=0; i<BLUE_TABLE_SIZE; i++) {
                 pBlueLed[i]->setSpeed(10);
                 pBlueLed[i]->setValue(MAX_BRIGHTNESS);
             }

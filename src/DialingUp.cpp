@@ -1,4 +1,5 @@
 #include "DialingUp.h"
+#include "config.h"
 #include "snd_roll.h"
 #include "snd_roll_start.h"
 #include "snd_ch_lock.h"
@@ -14,8 +15,8 @@
 #include "snd_ch_in7.h"
 #include "snd_dial_fail.h"
 
-#define MIN_BLUE_VALUE 10
-#define MID_BLUE_VALUE 200
+#define MIN_BLUE_VALUE 100
+#define MID_BLUE_VALUE 600
 #define MAX_BLUE_VALUE MAX_BRIGHTNESS
 
 DialingUp::DialingUp(AudioPlayer* pAudio, Motor* pMotor, PWMChannel** pChevron, PWMChannel** pBlueLed, PWMChannel* pWhiteLed) {
@@ -83,8 +84,8 @@ void DialingUp::openingGate() {
         //opening
         case 100:
             cancelStage = 105;
-            for(int i=0; i<9; i++) {
-                pChevron[i]->setValue(800);
+            for(int i=0; i<CHEVRON_TABLE_SIZE; i++) {
+                pChevron[i]->setValue(1200);
             }
             pAudio->play(snd_gate_open, sizeof(snd_gate_open));
             pAudio->loopNext(snd_wormhole_loop, sizeof(snd_wormhole_loop));
@@ -95,14 +96,14 @@ void DialingUp::openingGate() {
             pWhiteLed->setValue(MAX_BRIGHTNESS);
             pWhiteLed->setSpeed(50);
 
-            for(int i=0; i<18; i++) {
+            for(int i=0; i<BLUE_TABLE_SIZE; i++) {
                 pBlueLed[i]->autoOnOff(true);
                 blueLedSetup(i);
             }
             setWaitFor(1000, 102);
             break; 
         case 102: 
-            pWhiteLed->setValue(600);
+            pWhiteLed->setValue(1000);
             pWhiteLed->autoOnOff(false);
             openTimeout = random(15, 20);
             stage++;
@@ -116,7 +117,7 @@ void DialingUp::openingGate() {
             openTimeout--;
             break;
         case 104:
-            for(int i=0; i<18; i++) {
+            for(int i=0; i<BLUE_TABLE_SIZE; i++) {
                 if (random(0,3) > 1) {
                     continue;
                 }
@@ -127,10 +128,10 @@ void DialingUp::openingGate() {
         case 105:
             pAudio->play(snd_gate_close, sizeof(snd_gate_close));
             pWhiteLed->setValue(MAX_BRIGHTNESS);
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(MAX_BRIGHTNESS); 
             }
-            for (int i=0; i<18; i++) {
+            for (int i=0; i<BLUE_TABLE_SIZE; i++) {
                 pBlueLed[i]->setSpeed(100);
                 pBlueLed[i]->setValue(0);
             }
@@ -138,7 +139,7 @@ void DialingUp::openingGate() {
             break;
         case 106: 
             pWhiteLed->setValue(0);
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(0); 
             }
             stage = 0; //the end;
@@ -201,12 +202,12 @@ void DialingUp::dialFail() {
             setWaitFor(2100, 301);
         break;
         case 301: 
-            for (int i=0; i<18; i++) {
+            for (int i=0; i<BLUE_TABLE_SIZE; i++) {
                 pBlueLed[i]->setSpeed(10);
                 pBlueLed[i]->setValue(0);
             }
             pWhiteLed->setValue(0);
-            for (int i=0; i<9; i++) {
+            for (int i=0; i<CHEVRON_TABLE_SIZE; i++) {
                 pChevron[i]->setValue(0); 
             }
             stage = 0;
@@ -229,10 +230,10 @@ void DialingUp::dial() {
         return;
     } 
 
-    for(int i=0; i<9; i++) {
+    for(int i=0; i<CHEVRON_TABLE_SIZE; i++) {
         pChevron[i]->off();
     }
-    for (int i=0; i<18; i++) {
+    for (int i=0; i<BLUE_TABLE_SIZE; i++) {
         pBlueLed[i]->autoOnOff(false);
         pBlueLed[i]->off();
     }
@@ -246,10 +247,10 @@ void DialingUp::incomming() {
         return;
     } 
 
-    for(int i=0; i<9; i++) {
+    for(int i=0; i<CHEVRON_TABLE_SIZE; i++) {
         pChevron[i]->off();
     }
-    for (int i=0; i<18; i++) {
+    for (int i=0; i<BLUE_TABLE_SIZE; i++) {
         pBlueLed[i]->autoOnOff(false);
         pBlueLed[i]->off();
     }

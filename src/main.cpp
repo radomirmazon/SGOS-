@@ -7,6 +7,7 @@
 #include "DialingUp.h"
 #include "Button.h"
 #include "Lamp.h"
+#include "config.h"
 
 // --- MAX98357A I2S pins ---
 // BCLK → GPIO15 | LRC → GPIO16 | DIN → GPIO17 | SD → GPIO18 | GAIN → GND (9 dB)
@@ -31,8 +32,8 @@ static constexpr uint32_t MOTOR_RUN_MS      = 10000UL;
 #define PWM_FREQ 1000  // 1kHz for LEDs (no visible flicker)
 #define MAX_PWM 4095
 
-PWMChannel* pChevron[9];
-PWMChannel* pBlueLed[18];
+PWMChannel* pChevron[CHEVRON_TABLE_SIZE];
+PWMChannel* pBlueLed[BLUE_TABLE_SIZE];
 PWMChannel* pWhiteLed;
 
 DialingUp* pDialup;
@@ -97,6 +98,11 @@ void setup() {
   pBlueLed[15] = new PWMChannel(pca1, 8); 
   pBlueLed[16] = new PWMChannel(pca1, 5);
   pBlueLed[17] = new PWMChannel(pca1, 6);
+  //extra
+  pBlueLed[18] = new PWMChannel(pca1, 12);
+  pBlueLed[19] = new PWMChannel(pca1, 13);
+  pBlueLed[20] = new PWMChannel(pca1, 14);
+  pBlueLed[21] = new PWMChannel(pca1, 15);
 
   pWhiteLed = new PWMChannel(pca1, 11);
 
@@ -132,10 +138,10 @@ void setup() {
 
 void loop() {
 
-  for (uint8_t i=0; i<9; i++) {
+  for (uint8_t i=0; i<CHEVRON_TABLE_SIZE; i++) {
     pChevron[i]->loop();
   }
-  for (uint8_t i=0; i<18; i++) {
+  for (uint8_t i=0; i<BLUE_TABLE_SIZE; i++) {
     pBlueLed[i]->loop();
   }
   pWhiteLed->loop();
